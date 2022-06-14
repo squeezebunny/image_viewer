@@ -60,10 +60,10 @@ fn get_filelist() -> (Images, Option<usize>) {
 
 pub const VERTEX: &str = r#"#version 100
     attribute vec2 pos;
-    uniform float ratio;
+    uniform vec2 ratio;
     varying lowp vec2 texcoord;
     void main() {
-        gl_Position = vec4(pos.x * ratio, pos.y, 0, 1);
+        gl_Position = vec4(pos * ratio, 0, 1);
         texcoord = vec2(max(0.0, pos.x), max(0.0, -pos.y));
     }"#;
 
@@ -75,10 +75,11 @@ pub const FRAGMENT: &str = r#"#version 100
     }"#;
 
 struct Stage {
-    render: bool,
+    load: bool,
+
     bindings: Bindings,
     pipeline: Pipeline,
-    ratio: f32,
+    ratio: (f32, f32),
     images: Images,
     current_image_index: usize,
 }
@@ -95,7 +96,7 @@ impl Stage {
             ShaderMeta {
                 images: vec!["tex".to_string()],
                 uniforms: UniformBlockLayout {
-                    uniforms: vec![UniformDesc::new("ratio", UniformType::Float1)],
+                    uniforms: vec![UniformDesc::new("ratio", UniformType::Float2)],
                 },
             },
         )
@@ -120,10 +121,10 @@ impl Stage {
         let (filelist, initial) = get_filelist();
 
         Stage {
-            render: true,
+            load: true,
             bindings,
             pipeline,
-            ratio: 1.0,
+            ratio: (0.0, 0.0),
             images: filelist,
             current_image_index: initial.unwrap_or(0),
         }
@@ -155,23 +156,21 @@ impl Stage {
     }
 
     fn calculate_ratio(&mut self, ctx: &mut Context) {
-        let (sw, sh) = ctx.screen_size();
-        let (min, max) = (sw.min(sh), sw.max(sh));
-        self.ratio = min / max;
-
         let texture = self.bindings.images.get(0).unwrap();
-        let (sw, sh) = (texture.height, texture.width);
-        let (min, max) = (sw.min(sh) as f32, sw.max(sh) as f32);
+        let (sw, sh) = ctx.screen_size();
+        let (iw, ih) = (texture.width as f32, texture.height as f32);
 
-        self.ratio *= min / max;
-
-        //self.ratio = image_ratio as f32;
+        if sw > sh {
+            self.ratio = ((sh / sw) * (iw / ih), 1.0);
+        } else {
+            self.ratio = (1.0, (sw / sh) * (ih / iw));
+        }
     }
 
     fn next_image(&mut self) {
         println!("next_image  ");
         self.current_image_index = (self.current_image_index + 1) % self.images.len();
-        self.render = true;
+        self.load = true;
     }
 
     fn prev_image(&mut self) {
@@ -180,11 +179,25 @@ impl Stage {
         } else {
             self.current_image_index -= 1;
         }
-        self.render = true;
+        self.load = true;
     }
 }
 
 impl EventHandler for Stage {
+    fn char_event(
+        &mut self,
+        _ctx: &mut Context,
+        character: char,
+        _keymods: KeyMods,
+        _repeat: bool,
+    ) {
+        match character {
+            'u' => self.next_image(),
+            'o' => self.prev_image(),
+            _ => {}
+        }
+    }
+
     fn key_down_event(
         &mut self,
         _ctx: &mut Context,
@@ -194,8 +207,8 @@ impl EventHandler for Stage {
     ) {
         use KeyCode::*;
         match keycode {
-            F | Right => self.next_image(),
-            S | Left => self.prev_image(),
+            Right => self.next_image(),
+            Left => self.prev_image(),
             Escape => std::process::exit(0),
             _ => {}
         }
@@ -208,10 +221,10 @@ impl EventHandler for Stage {
     fn update(&mut self, _ctx: &mut Context) {}
 
     fn draw(&mut self, ctx: &mut Context) {
-        if self.render {
+        if self.load {
             self.load_image_from_current(ctx).unwrap();
             self.calculate_ratio(ctx);
-            self.render = false;
+            self.load = false;
         }
 
         ctx.begin_default_pass(PassAction::clear_color(0.0, 0.0, 0.0, 0.0));
@@ -229,6 +242,7 @@ fn main() {
     let conf = conf::Conf {
         window_title: "Quad Image Viewer".to_string(),
         window_resizable: true,
+        high_dpi: true,
         //fullscreen: true,
         platform: conf::Platform {
             linux_backend: conf::LinuxBackend::X11Only,
