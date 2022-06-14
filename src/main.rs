@@ -5,15 +5,24 @@ use std::path::{Path, PathBuf};
 
 type Images = Vec<PathBuf>;
 
-static TYPES: &'static [&'static str] = &["jpg", "jpeg", "png", "bmp", "tif"];
+#[rustfmt::skip]
+static SUPPORTED_IMAGE_TYPES: &'static [&'static str] = &[
+    "jpg", "jpeg",
+    "png",
+    "bmp",
+    "tif"
+];
 
 fn get_filelist() -> (Images, Option<usize>) {
-    let supported_image_types = TYPES.iter().map(|s| OsStr::new(s)).collect::<Vec<&OsStr>>();
-
+    let supported_image_types = SUPPORTED_IMAGE_TYPES
+        .iter()
+        .map(|s| OsStr::new(s))
+        .collect::<Vec<&OsStr>>();
     let file = std::env::args().last().expect("no file specified");
     let file_path = Path::new(&file);
     let file_directory_path = file_path.parent().expect("invalid file path");
 
+    // Get all images from the parent directory and filter out unsupported image types
     let mut image_filenames = file_directory_path
         .read_dir()
         .expect("problem reading directory")
@@ -41,10 +50,12 @@ fn get_filelist() -> (Images, Option<usize>) {
             )
     });
 
+    // Show found images
     image_filenames.iter().for_each(|f| {
         println!("Found image: {:#?}", f);
     });
 
+    // Set the inital image to the index of the original file path
     let mut inital_image = None;
     image_filenames.iter().enumerate().any(|(i, p)| {
         if file_path.cmp(p).is_eq() {
@@ -75,10 +86,9 @@ pub const FRAGMENT: &str = r#"#version 100
     }"#;
 
 struct Stage {
-    load: bool,
-
     bindings: Bindings,
     pipeline: Pipeline,
+    flip: bool,
     ratio: (f32, f32),
     images: Images,
     current_image_index: usize,
@@ -120,16 +130,19 @@ impl Stage {
 
         let (filelist, initial) = get_filelist();
 
-        Stage {
-            load: true,
+        let mut stage = Stage {
+            flip: false,
             bindings,
             pipeline,
             ratio: (0.0, 0.0),
             images: filelist,
             current_image_index: initial.unwrap_or(0),
-        }
-    }
+        };
 
+        stage.load_image_from_current(ctx).unwrap();
+
+        stage
+    }
     fn load_image_from_current(&mut self, ctx: &mut Context) -> Result<()> {
         // load the image
         use image::io::Reader;
@@ -151,6 +164,7 @@ impl Stage {
         texture.resize(ctx, image.width(), image.height(), Some(image.as_raw()));
 
         // calculate ratio of the image
+        self.calculate_ratio(ctx);
 
         Ok(())
     }
@@ -165,51 +179,54 @@ impl Stage {
         } else {
             self.ratio = (1.0, (sw / sh) * (ih / iw));
         }
+
+        if self.flip {
+            self.ratio.0 *= -1.0;
+        }
     }
 
-    fn next_image(&mut self) {
-        println!("next_image  ");
+    fn toggle_flip(&mut self, ctx: &mut Context) {
+        self.flip = !self.flip;
+        self.calculate_ratio(ctx);
+    }
+
+    fn next_image(&mut self, ctx: &mut Context) {
         self.current_image_index = (self.current_image_index + 1) % self.images.len();
-        self.load = true;
+        self.load_image_from_current(ctx).unwrap();
     }
 
-    fn prev_image(&mut self) {
+    fn prev_image(&mut self, ctx: &mut Context) {
         if self.current_image_index == 0 {
             self.current_image_index = self.images.len() - 1;
         } else {
             self.current_image_index -= 1;
         }
-        self.load = true;
+        self.load_image_from_current(ctx).unwrap();
+    }
+
+    fn random_image(&mut self, ctx: &mut Context) {
+        self.current_image_index = rand::random::<usize>() % self.images.len();
+        self.load_image_from_current(ctx).unwrap();
     }
 }
 
 impl EventHandler for Stage {
-    fn char_event(
-        &mut self,
-        _ctx: &mut Context,
-        character: char,
-        _keymods: KeyMods,
-        _repeat: bool,
-    ) {
+    fn char_event(&mut self, ctx: &mut Context, character: char, _: KeyMods, _: bool) {
         match character {
-            'u' => self.next_image(),
-            'o' => self.prev_image(),
+            'u' => self.next_image(ctx),
+            'o' => self.prev_image(ctx),
+            'm' => self.toggle_flip(ctx),
             _ => {}
         }
     }
 
-    fn key_down_event(
-        &mut self,
-        _ctx: &mut Context,
-        keycode: KeyCode,
-        _keymods: KeyMods,
-        _repeat: bool,
-    ) {
+    fn key_down_event(&mut self, ctx: &mut Context, keycode: KeyCode, _: KeyMods, _: bool) {
         use KeyCode::*;
         match keycode {
-            Right => self.next_image(),
-            Left => self.prev_image(),
+            Right => self.next_image(ctx),
+            Left => self.prev_image(ctx),
             Escape => std::process::exit(0),
+            Space => self.random_image(ctx),
             _ => {}
         }
     }
@@ -221,12 +238,6 @@ impl EventHandler for Stage {
     fn update(&mut self, _ctx: &mut Context) {}
 
     fn draw(&mut self, ctx: &mut Context) {
-        if self.load {
-            self.load_image_from_current(ctx).unwrap();
-            self.calculate_ratio(ctx);
-            self.load = false;
-        }
-
         ctx.begin_default_pass(PassAction::clear_color(0.0, 0.0, 0.0, 0.0));
         ctx.apply_pipeline(&self.pipeline);
         ctx.apply_bindings(&self.bindings);
@@ -243,7 +254,7 @@ fn main() {
         window_title: "Quad Image Viewer".to_string(),
         window_resizable: true,
         high_dpi: true,
-        //fullscreen: true,
+        fullscreen: true,
         platform: conf::Platform {
             linux_backend: conf::LinuxBackend::X11Only,
             linux_x11_gl: conf::LinuxX11Gl::GLXWithEGLFallback,
