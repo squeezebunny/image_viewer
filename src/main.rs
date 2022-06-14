@@ -1,17 +1,14 @@
+use anyhow::Result;
+use miniquad::*;
 use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
-use wgpu::util::DeviceExt;
-use winit::{
-    event::*,
-    event_loop::{ControlFlow, EventLoop},
-    window::Window,
-    window::WindowBuilder,
-};
+type Images = Vec<PathBuf>;
 
-pub fn main() {
-    use std::path::{Path, PathBuf};
+static TYPES: &'static [&'static str] = &["jpg", "jpeg", "png", "bmp", "tif"];
 
-    let supported_image_types = ["png", "jpg", "jpeg"].map(|s| OsStr::new(s));
+fn get_filelist() -> (Images, Option<usize>) {
+    let supported_image_types = TYPES.iter().map(|s| OsStr::new(s)).collect::<Vec<&OsStr>>();
 
     let file = std::env::args().last().expect("no file specified");
     let file_path = Path::new(&file);
@@ -30,289 +27,218 @@ pub fn main() {
         })
         .collect::<Vec<PathBuf>>();
 
-    // Sort image filenames by modification date
+    // Sort image filenames by modification date descending
     image_filenames.sort_by(|a, b| {
-        a.metadata()
+        b.metadata()
             .expect("error reading file metadata")
             .modified()
             .unwrap()
             .cmp(
-                &b.metadata()
+                &a.metadata()
                     .expect("error reading file metadata")
                     .modified()
                     .unwrap(),
             )
     });
-    for i in image_filenames {
-        //i.metadata().unwrap().modified()
-        println!("{:#?}", &i);
-    }
 
-    pollster::block_on(run());
+    image_filenames.iter().for_each(|f| {
+        println!("Found image: {:#?}", f);
+    });
+
+    let mut inital_image = None;
+    image_filenames.iter().enumerate().any(|(i, p)| {
+        if file_path.cmp(p).is_eq() {
+            inital_image = Some(i);
+            true
+        } else {
+            false
+        }
+    });
+
+    (image_filenames, inital_image)
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    position: [f32; 2],
+pub const VERTEX: &str = r#"#version 100
+    attribute vec2 pos;
+    uniform float ratio;
+    varying lowp vec2 texcoord;
+    void main() {
+        gl_Position = vec4(pos.x * ratio, pos.y, 0, 1);
+        texcoord = vec2(max(0.0, pos.x), max(0.0, -pos.y));
+    }"#;
+
+pub const FRAGMENT: &str = r#"#version 100
+    varying lowp vec2 texcoord;
+    uniform sampler2D tex;
+    void main() {
+        gl_FragColor = texture2D(tex, texcoord);
+    }"#;
+
+struct Stage {
+    render: bool,
+    bindings: Bindings,
+    pipeline: Pipeline,
+    ratio: f32,
+    images: Images,
+    current_image_index: usize,
 }
 
-const QUAD: &[Vertex] = &[
-    Vertex {
-        position: [0.0, 0.0],
-    },
-    Vertex {
-        position: [-1.0, -1.0],
-    },
-    Vertex {
-        position: [1.0, -1.0],
-    },
-    Vertex {
-        position: [-1.0, 1.0],
-    },
-    Vertex {
-        position: [1.0, 1.0],
-    },
-];
+impl Stage {
+    fn new(ctx: &mut Context) -> Stage {
+        let texture = Texture::empty();
+        texture.set_filter(ctx, FilterMode::Linear);
 
-pub struct State {
-    surface: wgpu::Surface,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    size: winit::dpi::PhysicalSize<u32>,
-
-    pipeline: wgpu::RenderPipeline,
-    buffer: wgpu::Buffer,
-}
-
-impl State {
-    async fn new(window: &Window) -> Self {
-        let size = window.inner_size();
-
-        let instance = wgpu::Instance::new(wgpu::Backends::all());
-        let surface = unsafe { instance.create_surface(window) };
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .unwrap();
-
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    features: wgpu::Features::empty(),
-                    limits: if cfg!(target_arch = "wasm32") {
-                        wgpu::Limits::downlevel_webgl2_defaults()
-                    } else {
-                        wgpu::Limits::default()
-                    },
-                    label: None,
+        let shader = Shader::new(
+            ctx,
+            VERTEX,
+            FRAGMENT,
+            ShaderMeta {
+                images: vec!["tex".to_string()],
+                uniforms: UniformBlockLayout {
+                    uniforms: vec![UniformDesc::new("ratio", UniformType::Float1)],
                 },
-                None,
-            )
-            .await
-            .unwrap();
+            },
+        )
+        .unwrap();
 
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface.get_preferred_format(&adapter).unwrap(),
-            width: size.width,
-            height: size.height,
-            present_mode: wgpu::PresentMode::Immediate,
+        let vertices: [f32; 8] = [-1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0];
+        let indices: [u16; 6] = [0, 1, 2, 2, 3, 0];
+
+        let bindings = Bindings {
+            vertex_buffers: vec![Buffer::immutable(ctx, BufferType::VertexBuffer, &vertices)],
+            index_buffer: Buffer::immutable(ctx, BufferType::IndexBuffer, &indices),
+            images: vec![texture],
         };
 
-        surface.configure(&device, &config);
+        let pipeline = Pipeline::new(
+            ctx,
+            &[BufferLayout::default()],
+            &[VertexAttribute::new("pos", VertexFormat::Float2)],
+            shader,
+        );
 
-        let shader = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
-            label: None,
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
+        let (filelist, initial) = get_filelist();
 
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(QUAD),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let render_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: None,
-                bind_group_layouts: &[],
-                push_constant_ranges: &[],
-            });
-
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute {
-                        offset: 0,
-                        shader_location: 0,
-                        format: wgpu::VertexFormat::Float32x2,
-                    }],
-                }],
-            },
-            fragment: None,
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Cw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-        });
-
-        Self {
-            surface,
-            device,
-            queue,
-            config,
-            size,
-
-            buffer: vertex_buffer,
-            pipeline: render_pipeline,
+        Stage {
+            render: true,
+            bindings,
+            pipeline,
+            ratio: 1.0,
+            images: filelist,
+            current_image_index: initial.unwrap_or(0),
         }
     }
 
-    pub fn input(&mut self, event: &WindowEvent) -> bool {
-        false
-    }
+    fn load_image_from_current(&mut self, ctx: &mut Context) -> Result<()> {
+        // load the image
+        use image::io::Reader;
+        use std::fs::File;
+        use std::io::BufReader;
 
-    pub fn update(&mut self) {}
+        let path = self
+            .images
+            .get(self.current_image_index)
+            .expect("invalid image index");
+        let file = File::open(path)?;
+        let reader = Reader::new(BufReader::new(file)).with_guessed_format()?;
+        println!("oi {:#?}", path);
 
-    pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width > 0 && new_size.height > 0 {
-            self.size = new_size;
-            self.config.width = new_size.width;
-            self.config.height = new_size.height;
-            self.surface.configure(&self.device, &self.config);
-        }
-    }
+        let image = reader.decode()?.to_rgba8();
 
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let output = self.surface.get_current_texture()?;
+        // pump the texture with the image
+        let texture = self.bindings.images.get_mut(0).unwrap();
+        texture.resize(ctx, image.width(), image.height(), Some(image.as_raw()));
 
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
-
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Render Pass"),
-            color_attachments: &[wgpu::RenderPassColorAttachment {
-                view: &view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.3,
-                        g: 0.2,
-                        b: 0.1,
-                        a: 1.0,
-                    }),
-                    store: true,
-                },
-            }],
-            depth_stencil_attachment: None,
-        });
-
-        render_pass.set_pipeline(&self.pipeline);
-        render_pass.draw(0..5, 0..1);
-        drop(render_pass);
-
-        // submit will accept anything that implements IntoIter
-        self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
+        // calculate ratio of the image
 
         Ok(())
     }
+
+    fn calculate_ratio(&mut self, ctx: &mut Context) {
+        let (sw, sh) = ctx.screen_size();
+        let (min, max) = (sw.min(sh), sw.max(sh));
+        self.ratio = min / max;
+
+        let texture = self.bindings.images.get(0).unwrap();
+        let (sw, sh) = (texture.height, texture.width);
+        let (min, max) = (sw.min(sh) as f32, sw.max(sh) as f32);
+
+        self.ratio *= min / max;
+
+        //self.ratio = image_ratio as f32;
+    }
+
+    fn next_image(&mut self) {
+        println!("next_image  ");
+        self.current_image_index = (self.current_image_index + 1) % self.images.len();
+        self.render = true;
+    }
+
+    fn prev_image(&mut self) {
+        if self.current_image_index == 0 {
+            self.current_image_index = self.images.len() - 1;
+        } else {
+            self.current_image_index -= 1;
+        }
+        self.render = true;
+    }
 }
 
-pub async fn run() {
-    env_logger::init();
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("Image Viewer")
-        .with_decorations(false)
-        .build(&event_loop)
-        .unwrap();
+impl EventHandler for Stage {
+    fn key_down_event(
+        &mut self,
+        _ctx: &mut Context,
+        keycode: KeyCode,
+        _keymods: KeyMods,
+        _repeat: bool,
+    ) {
+        use KeyCode::*;
+        match keycode {
+            F | Right => self.next_image(),
+            S | Left => self.prev_image(),
+            Escape => std::process::exit(0),
+            _ => {}
+        }
+    }
 
-    window.set_maximized(true);
+    fn resize_event(&mut self, ctx: &mut Context, _: f32, _: f32) {
+        self.calculate_ratio(ctx);
+    }
 
-    let mut state = State::new(&window).await;
+    fn update(&mut self, _ctx: &mut Context) {}
 
-    event_loop.run(move |event, _, control_flow| match event {
-        Event::RedrawRequested(window_id) if window_id == window.id() => {
-            state.update();
-            match state.render() {
-                Ok(_) => {}
-                // Reconfigure the surface if lost
-                Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
-                // The system is out of memory, we should probably quit
-                Err(wgpu::SurfaceError::OutOfMemory) => *control_flow = ControlFlow::Exit,
-                // All other errors (Outdated, Timeout) should be resolved by the next frame
-                Err(e) => eprintln!("{:?}", e),
-            }
+    fn draw(&mut self, ctx: &mut Context) {
+        if self.render {
+            self.load_image_from_current(ctx).unwrap();
+            self.calculate_ratio(ctx);
+            self.render = false;
         }
 
-        Event::MainEventsCleared => {
-            window.request_redraw();
-        }
+        ctx.begin_default_pass(PassAction::clear_color(0.0, 0.0, 0.0, 0.0));
+        ctx.apply_pipeline(&self.pipeline);
+        ctx.apply_bindings(&self.bindings);
 
-        Event::WindowEvent {
-            ref event,
-            window_id,
-        } if window_id == window.id() => {
-            if !state.input(event) {
-                match event {
-                    WindowEvent::MouseInput {
-                        state: ElementState::Pressed,
-                        ..
-                    } => {}
+        ctx.apply_uniforms(&[self.ratio]);
+        ctx.draw(0, 6, 1);
+        ctx.end_render_pass();
+        ctx.commit_frame();
+    }
+}
 
-                    // Resize
-                    WindowEvent::Resized(physical_size) => {
-                        state.resize(*physical_size);
-                    }
+fn main() {
+    let conf = conf::Conf {
+        window_title: "Quad Image Viewer".to_string(),
+        window_resizable: true,
+        //fullscreen: true,
+        platform: conf::Platform {
+            linux_backend: conf::LinuxBackend::X11Only,
+            linux_x11_gl: conf::LinuxX11Gl::GLXWithEGLFallback,
+            swap_interval: None,
+            framebuffer_alpha: true,
+        },
 
-                    // Close the window
-                    WindowEvent::CloseRequested
-                    | WindowEvent::KeyboardInput {
-                        input:
-                            KeyboardInput {
-                                state: ElementState::Pressed,
-                                virtual_keycode: Some(VirtualKeyCode::Escape),
-                                ..
-                            },
-                        ..
-                    } => *control_flow = ControlFlow::Exit,
-                    _ => {}
-                }
-            }
-        }
-        _ => {}
-    });
+        ..Default::default()
+    };
+
+    start(conf, |mut ctx| Box::new(Stage::new(&mut ctx)));
 }
