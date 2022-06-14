@@ -175,9 +175,10 @@ impl Stage {
         let (iw, ih) = (texture.width as f32, texture.height as f32);
 
         if sw > sh {
-            self.ratio = ((sh / sw) * (iw / ih), 1.0);
+            let x_ratio = (sh / sw) * (iw / ih);
+            self.ratio = ((x_ratio).min(1.0), (1.0 - x_ratio).max(1.0));
         } else {
-            self.ratio = (1.0, (sw / sh) * (ih / iw));
+            self.ratio = (1.0, ((sw / sh) * (ih / iw)).min(1.0));
         }
 
         if self.flip {
@@ -241,7 +242,6 @@ impl EventHandler for Stage {
         ctx.begin_default_pass(PassAction::clear_color(0.0, 0.0, 0.0, 0.0));
         ctx.apply_pipeline(&self.pipeline);
         ctx.apply_bindings(&self.bindings);
-
         ctx.apply_uniforms(&[self.ratio]);
         ctx.draw(0, 6, 1);
         ctx.end_render_pass();
@@ -254,7 +254,7 @@ fn main() {
         window_title: "Quad Image Viewer".to_string(),
         window_resizable: true,
         high_dpi: true,
-        fullscreen: true,
+        //fullscreen: true,
         platform: conf::Platform {
             linux_backend: conf::LinuxBackend::X11Only,
             linux_x11_gl: conf::LinuxX11Gl::GLXWithEGLFallback,
