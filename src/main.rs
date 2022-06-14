@@ -155,7 +155,6 @@ impl Stage {
             .expect("invalid image index");
         let file = File::open(path)?;
         let reader = Reader::new(BufReader::new(file)).with_guessed_format()?;
-        println!("oi {:#?}", path);
 
         let image = reader.decode()?.to_rgba8();
 
@@ -171,15 +170,14 @@ impl Stage {
 
     fn calculate_ratio(&mut self, ctx: &mut Context) {
         let texture = self.bindings.images.get(0).unwrap();
+
         let (sw, sh) = ctx.screen_size();
         let (iw, ih) = (texture.width as f32, texture.height as f32);
 
-        if sw > sh {
-            let x_ratio = (sh / sw) * (iw / ih);
-            self.ratio = ((x_ratio).min(1.0), (1.0 - x_ratio).max(1.0));
-        } else {
-            self.ratio = (1.0, ((sw / sh) * (ih / iw)).min(1.0));
-        }
+        self.ratio = (
+            ((sh / sw) * (iw / ih)).min(1.0),
+            ((sw / sh) * (ih / iw)).min(1.0),
+        );
 
         if self.flip {
             self.ratio.0 *= -1.0;
