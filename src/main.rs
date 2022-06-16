@@ -3,6 +3,8 @@ use miniquad::*;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+const RENDERS: i8 = 3; // amount of times to render the screen
+
 type Images = Vec<PathBuf>;
 
 #[rustfmt::skip]
@@ -86,9 +88,12 @@ pub const FRAGMENT: &str = r#"#version 100
     }"#;
 
 struct Stage {
+    render: i8,
+    flip: bool,
+    fullscreen: bool,
+
     bindings: Bindings,
     pipeline: Pipeline,
-    flip: bool,
     ratio: (f32, f32),
     images: Images,
     current_image_index: usize,
@@ -98,6 +103,8 @@ impl Stage {
     fn new(ctx: &mut Context) -> Stage {
         let texture = Texture::empty();
         texture.set_filter(ctx, FilterMode::Linear);
+
+        ctx.show_mouse(false);
 
         let shader = Shader::new(
             ctx,
@@ -131,6 +138,8 @@ impl Stage {
         let (filelist, initial) = get_filelist();
 
         let mut stage = Stage {
+            render: RENDERS,
+            fullscreen: false,
             flip: false,
             bindings,
             pipeline,
@@ -169,6 +178,9 @@ impl Stage {
     }
 
     fn calculate_ratio(&mut self, ctx: &mut Context) {
+        // mark render
+        self.render = RENDERS;
+
         let texture = self.bindings.images.get(0).unwrap();
 
         let (sw, sh) = ctx.screen_size();
@@ -207,6 +219,11 @@ impl Stage {
         self.current_image_index = rand::random::<usize>() % self.images.len();
         self.load_image_from_current(ctx).unwrap();
     }
+
+    fn toggle_fullscreen(&mut self, ctx: &mut Context) {
+        self.fullscreen = !self.fullscreen;
+        ctx.set_fullscreen(self.fullscreen);
+    }
 }
 
 impl EventHandler for Stage {
@@ -215,6 +232,10 @@ impl EventHandler for Stage {
             'u' => self.next_image(ctx),
             'o' => self.prev_image(ctx),
             'm' => self.toggle_flip(ctx),
+            'f' => self.toggle_fullscreen(ctx),
+
+            'q' => std::process::exit(0),
+
             _ => {}
         }
     }
@@ -224,8 +245,10 @@ impl EventHandler for Stage {
         match keycode {
             Right => self.next_image(ctx),
             Left => self.prev_image(ctx),
-            Escape => std::process::exit(0),
             Space => self.random_image(ctx),
+
+            Escape => std::process::exit(0),
+
             _ => {}
         }
     }
@@ -237,12 +260,16 @@ impl EventHandler for Stage {
     fn update(&mut self, _ctx: &mut Context) {}
 
     fn draw(&mut self, ctx: &mut Context) {
-        ctx.begin_default_pass(PassAction::clear_color(0.0, 0.0, 0.0, 0.0));
-        ctx.apply_pipeline(&self.pipeline);
-        ctx.apply_bindings(&self.bindings);
-        ctx.apply_uniforms(&[self.ratio]);
-        ctx.draw(0, 6, 1);
-        ctx.end_render_pass();
+        if self.render > 0 {
+            ctx.begin_default_pass(PassAction::clear_color(0.0, 0.0, 0.0, 0.0));
+            ctx.apply_pipeline(&self.pipeline);
+            ctx.apply_bindings(&self.bindings);
+            ctx.apply_uniforms(&[self.ratio]);
+            ctx.draw(0, 6, 1);
+            ctx.end_render_pass();
+
+            self.render -= 1;
+        }
         ctx.commit_frame();
     }
 }
@@ -251,6 +278,8 @@ fn main() {
     let conf = conf::Conf {
         window_title: "Quad Image Viewer".to_string(),
         window_resizable: true,
+        window_width: 1000,
+        window_height: 800,
         high_dpi: true,
         //fullscreen: true,
         platform: conf::Platform {
